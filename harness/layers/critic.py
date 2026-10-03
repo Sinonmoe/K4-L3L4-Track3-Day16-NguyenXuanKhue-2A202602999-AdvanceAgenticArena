@@ -79,16 +79,68 @@ class Critic(Middleware):
     name = "critic"
 
     def after_agent(self, ctx, report):
-        # TODO (§2): khoảng 10-25 dòng.
-        #  1. Lấy report["claims"]; nếu rỗng hoặc không phải list thì thôi.
-        #  2. Với mỗi claim: nếu claim["text"] có trong ctx.observed_text
-        #     -> giữ nguyên (KHÔNG sửa chữ).
-        #  3. Nếu không: thử tách câu ghép (trường hợp (c) ở docstring).
-        #     Tách được -> giữ cả hai nửa, mỗi nửa gắn doc_id của tài liệu
-        #     thật sự chứa nó, và đặt report["abstain"] = True.
-        #  4. Không tách được -> đây là bịa: bỏ claim đi.
-        #  5. Nếu không còn claim nào: report["abstain"] = True,
-        #     claims = [], citations = [], và viết lại "answer" nói rõ là
-        #     không đủ căn cứ.
-        #  6. Cập nhật report["citations"] cho khớp với claims còn lại.
-        return report  # <- mặc định KHÔNG LÀM GÌ: agent vẫn chạy được
+        claims = report.get("claims")
+        if not isinstance(claims, list):
+            return report
+
+        observed = getattr(ctx, "observed_text", "") or ""
+        valid_claims = []
+        abstained_split = False
+
+        for claim in claims:
+            if not isinstance(claim, dict) or "text" not in claim:
+                continue
+            text = claim["text"]
+            if text in observed:
+                valid_claims.append(claim)
+                continue
+
+            # Thử tách câu ghép (trường hợp (c))
+            sep = " và "
+            start = 0
+            split_cand = None
+            while True:
+                idx = text.find(sep, start)
+                if idx == -1:
+                    break
+                left = text[:idx]
+                right = text[idx + len(sep):]
+                start = idx + 1
+                for l_cand in [left, left.rstrip()]:
+                    for r_cand in [right, right.lstrip()]:
+                        if l_cand in observed and r_cand in observed and len(l_cand) > 10 and len(r_cand) > 10:
+                            docs = ctx.corpus.docs if getattr(ctx, "corpus", None) else []
+                            docs_l = [d.doc_id for d in docs if l_cand in d.body and d.body in observed]
+                            docs_r = [d.doc_id for d in docs if r_cand in d.body and d.body in observed]
+                            for dl in docs_l:
+                                for dr in docs_r:
+                                    if dl != dr:
+                                        split_cand = (l_cand, dl, r_cand, dr)
+                                        break
+                                if split_cand:
+                                    break
+                        if split_cand:
+                            break
+                    if split_cand:
+                        break
+                if split_cand:
+                    break
+
+            if split_cand:
+                l_cand, dl, r_cand, dr = split_cand
+                valid_claims.append({"text": l_cand, "doc_id": dl})
+                valid_claims.append({"text": r_cand, "doc_id": dr})
+                abstained_split = True
+
+        if not valid_claims:
+            report["abstain"] = True
+            report["claims"] = []
+            report["citations"] = []
+            report["answer"] = "Không đủ căn cứ trong tài liệu đã đọc để trả lời câu hỏi."
+        else:
+            if abstained_split:
+                report["abstain"] = True
+            report["claims"] = valid_claims
+            report["citations"] = sorted({c["doc_id"] for c in valid_claims if isinstance(c, dict) and c.get("doc_id")})
+
+        return report
